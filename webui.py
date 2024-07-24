@@ -6,10 +6,14 @@ import base64
 import io
 import gradio as gr
 import re
-
+from fastapi import FastAPI, File, UploadFile
 import numpy as np
 import torch
 import torchaudio
+
+from pydub import AudioSegment
+from pydub.silence import detect_nonsilent, split_on_silence
+
 
 
 from funasr import AutoModel
@@ -168,7 +172,7 @@ def model_inference(input_wav, language, fs=16000):
 						  cache={},
 						  language=language,
 						  use_itn=True,
-						  batch_size_s=60, merge_vad=merge_vad)
+						  batch_size_s=0, merge_vad=merge_vad)
 	
 	print(text)
 	text = text[0]["text"]
@@ -179,40 +183,113 @@ def model_inference(input_wav, language, fs=16000):
 	return text
 
 
-audio_examples = [
-    ["example/zh.mp3", "zh"],
-    ["example/yue.mp3", "yue"],
-    ["example/en.mp3", "en"],
-    ["example/ja.mp3", "ja"],
-    ["example/ko.mp3", "ko"],
-    ["example/emo_1.wav", "auto"],
-    ["example/emo_2.wav", "auto"],
-    ["example/emo_3.wav", "auto"],
-    #["example/emo_4.wav", "auto"],
-    #["example/event_1.wav", "auto"],
-    #["example/event_2.wav", "auto"],
-    #["example/event_3.wav", "auto"],
-    ["example/rich_1.wav", "auto"],
-    ["example/rich_2.wav", "auto"],
-    #["example/rich_3.wav", "auto"],
-    ["example/longwav_1.wav", "auto"],
-    ["example/longwav_2.wav", "auto"],
-    ["example/longwav_3.wav", "auto"],
-    #["example/longwav_4.wav", "auto"],
-]
+def model_inference(input_wav, language, fs=16000):
+    language_abbr = {"auto": "auto", "zh": "zh", "en": "en", "yue": "yue", "ja": "ja", "ko": "ko",
+                     "nospeech": "nospeech"}
+    
+    language = "auto" if len(language) < 1 else language
+    selected_language = language_abbr[language]
+    
+    if isinstance(input_wav, tuple):
+        fs, input_wav = input_wav
+        input_wav = input_wav.astype(np.float32) / np.iinfo(np.int16).max
+        if len(input_wav.shape) > 1:
+            input_wav = input_wav.mean(-1)
+        if fs != 16000:
+            print(f"audio_fs: {fs}")
+            resampler = torchaudio.transforms.Resample(fs, 16000)
+            input_wav_t = torch.from_numpy(input_wav).to(torch.float32)
+            input_wav = resampler(input_wav_t[None, :])[0, :].numpy()
+    
+    merge_vad = True
+    print(f"language: {language}, merge_vad: {merge_vad}")
+    text = model.generate(input=input_wav,
+                          cache={},
+                          language=language,
+                          use_itn=True,
+                          batch_size_s=0, merge_vad=merge_vad)
+    
+    print(text)
+    text = text[0]["text"]
+    text = format_str_v3(text)
+    
+    print(text)
+    
+    return text
+# 转换毫秒到SRT时间格式
+def ms_to_srt_time(ms):
+    seconds, milliseconds = divmod(ms, 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02},{int(milliseconds):03}"
+
+def segment_and_transcribe(input_wav, language, output_path = "outsrt/transcription.srt"):
+
+    if isinstance(input_wav, tuple):
+        fs, input_wav = input_wav
+        input_wav = input_wav.astype(np.float32) / np.iinfo(np.int16).max
+        if len(input_wav.shape) > 1:
+            input_wav = input_wav.mean(-1)
+        if fs != 16000:
+            resampler = torchaudio.transforms.Resample(fs, 16000)
+            input_wav_t = torch.from_numpy(input_wav).to(torch.float32)
+            input_wav = resampler(input_wav_t[None, :])[0, :].numpy()
+        input_wav = (input_wav * np.iinfo(np.int16).max).astype(np.int16)
+
+    audio_segment = AudioSegment(
+        input_wav.tobytes(), 
+        frame_rate=16000, 
+        sample_width=input_wav.dtype.itemsize, 
+        channels=1
+    )
+
+    nonsilent_ranges = detect_nonsilent(audio_segment, min_silence_len=500, silence_thresh=-40)
+    srt_content = []
+    start_time = 0
+    counter = 1
+
+    for start, end in nonsilent_ranges:
+        # 处理静音片段
+        if start_time < start:
+            srt_content.append(f"{counter}\n{ms_to_srt_time(start_time)} --> {ms_to_srt_time(start)}\n\n")
+            counter += 1
+        # 处理非静音片段
+        chunk = audio_segment[start:end]
+        segment_wav = np.array(chunk.get_array_of_samples())
+        segment_wav = (segment_wav / np.iinfo(np.int16).max).astype(np.float32)
+        
+        transcription = model_inference(segment_wav, language)
+        
+        srt_content.append(f"{counter}\n{ms_to_srt_time(start)} --> {ms_to_srt_time(end)}\n{transcription}\n")
+        counter += 1
+        start_time = end  # 更新下一个片段的开始时间
+    
+    # 处理音频末尾的静音段
+    if start_time < len(audio_segment):
+        srt_content.append(f"{counter}\n{ms_to_srt_time(start_time)} --> {ms_to_srt_time(len(audio_segment))}\n\n")
+
+    srt_text = "\n".join(srt_content)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(srt_text)
+    
+    print(f"SRT file saved to {output_path}")
+    return srt_text
 
 
+    
 
 html_content = """
 <div>
-    <h2 style="font-size: 22px;margin-left: 0px;">Voice Understanding Model: SenseVoice-Small</h2>
-    <p style="font-size: 18px;margin-left: 20px;">SenseVoice-Small is an encoder-only speech foundation model designed for rapid voice understanding. It encompasses a variety of features including automatic speech recognition (ASR), spoken language identification (LID), speech emotion recognition (SER), and acoustic event detection (AED). SenseVoice-Small supports multilingual recognition for Chinese, English, Cantonese, Japanese, and Korean. Additionally, it offers exceptionally low inference latency, performing 7 times faster than Whisper-small and 17 times faster than Whisper-large.</p>
-    <h2 style="font-size: 22px;margin-left: 0px;">Usage</h2> <p style="font-size: 18px;margin-left: 20px;">Upload an audio file or input through a microphone, then select the task and language. the audio is transcribed into corresponding text along with associated emotions (😊 happy, 😡 angry/exicting, 😔 sad) and types of sound events (😀 laughter, 🎼 music, 👏 applause, 🤧 cough&sneeze, 😭 cry). The event labels are placed in the front of the text and the emotion are in the back of the text.</p>
-	<p style="font-size: 18px;margin-left: 20px;">Recommended audio input duration is below 30 seconds. For audio longer than 30 seconds, local deployment is recommended.</p>
-	<h2 style="font-size: 22px;margin-left: 0px;">Repo</h2>
-	<p style="font-size: 18px;margin-left: 20px;"><a href="https://github.com/FunAudioLLM/SenseVoice" target="_blank">SenseVoice</a>: multilingual speech understanding model</p>
-	<p style="font-size: 18px;margin-left: 20px;"><a href="https://github.com/modelscope/FunASR" target="_blank">FunASR</a>: fundamental speech recognition toolkit</p>
-	<p style="font-size: 18px;margin-left: 20px;"><a href="https://github.com/FunAudioLLM/CosyVoice" target="_blank">CosyVoice</a>: high-quality multilingual TTS model</p>
+    <h2 style="font-size: 22px;margin-left: 0px;">声音理解模型：SenseVoice-Small</h2>
+    <p style="font-size: 18px;margin-left: 20px;">SenseVoice-Small 是一个编码器基础的声音基础模型，专为快速声音理解而设计。它包含了多种特性，包括自动语音识别（ASR）、口语识别（LID）、语音情感识别（SER）和声学事件检测（AED）。SenseVoice-Small 支持中文、英文、粤语、日语和韩语的多语种识别。此外，它还提供了异常低的推理延迟，比 Whisper-small 快 7 倍，比 Whisper-large 快 17 倍。</p>
+    <h2 style="font-size: 22px;margin-left: 0px;">使用方法</h2> 
+    <p style="font-size: 18px;margin-left: 20px;">上传音频文件或通过麦克风输入，然后选择任务和语言。音频将被转录成相应的文本，并附带相关的情感（😊 快乐，😡 生气/兴奋，😔 悲伤）和声音事件类型（😀 笑声，🎼 音乐，👏 掌声，🤧 咳嗽和打喷嚏，😭 哭泣）。事件标签将放置在文本的前面，情感标签将放在文本的后面。</p>
+    <p style="font-size: 18px;margin-left: 20px;">推荐音频输入时长不超过 30 秒。对于超过 30 秒的音频，建议本地部署。</p>
+    <h2 style="font-size: 22px;margin-left: 0px;">代码仓库</h2>
+    <p style="font-size: 18px;margin-left: 20px;"><a href="https://github.com/FunAudioLLM/SenseVoice" target="_blank">SenseVoice</a>: 多语种语音理解模型</p>
+    <p style="font-size: 18px;margin-left: 20px;"><a href="https://github.com/modelscope/FunASR" target="_blank">FunASR</a>: 基础语音识别工具包</p>
+    <p style="font-size: 18px;margin-left: 20px;"><a href="https://github.com/FunAudioLLM/CosyVoice" target="_blank">CosyVoice</a>: 高品质多语种TTS模型</p>
 </div>
 """
 
@@ -223,18 +300,22 @@ def launch():
 		gr.HTML(html_content)
 		with gr.Row():
 			with gr.Column():
-				audio_inputs = gr.Audio(label="Upload audio or use the microphone")
-				
+				audio_inputs = gr.Audio(label="上传音频")
 				with gr.Accordion("Configuration"):
+					# task_inputs = gr.Radio(choices=["Speech Recognition", "Rich Text Transcription"],
+					# 					   value="Speech Recognition", label="Task")
 					language_inputs = gr.Dropdown(choices=["auto", "zh", "en", "yue", "ja", "ko", "nospeech"],
 												  value="auto",
 												  label="Language")
-				fn_button = gr.Button("Start", variant="primary")
-				text_outputs = gr.Textbox(label="Results")
-			gr.Examples(examples=audio_examples, inputs=[audio_inputs, language_inputs], examples_per_page=20)
+			with gr.Column():		
+				fn_button = gr.Button("一般输出", variant="primary")
+				fn_button1 = gr.Button("字幕输出", variant="primary")				
+				text_outputs = gr.Textbox(label="输出结果")
 		
 		fn_button.click(model_inference, inputs=[audio_inputs, language_inputs], outputs=text_outputs)
-
+		fn_button1.click(segment_and_transcribe, inputs=[audio_inputs, language_inputs], outputs=text_outputs)
+		# with gr.Accordion("More examples"):
+		# 	gr.HTML(centered_table_html)
 	demo.launch()
 
 
