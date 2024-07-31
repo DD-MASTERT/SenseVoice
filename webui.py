@@ -143,50 +143,7 @@ def format_str_v3(s):
 	return new_s.strip()
 
 def model_inference(input_wav, language, fs=16000):
-	# task_abbr = {"Speech Recognition": "ASR", "Rich Text Transcription": ("ASR", "AED", "SER")}
-	language_abbr = {"auto": "auto", "zh": "zh", "en": "en", "yue": "yue", "ja": "ja", "ko": "ko",
-					 "nospeech": "nospeech"}
-	
-	# task = "Speech Recognition" if task is None else task
-	language = "auto" if len(language) < 1 else language
-	selected_language = language_abbr[language]
-	# selected_task = task_abbr.get(task)
-	
-	# print(f"input_wav: {type(input_wav)}, {input_wav[1].shape}, {input_wav}")
-	
-	if isinstance(input_wav, tuple):
-		fs, input_wav = input_wav
-		input_wav = input_wav.astype(np.float32) / np.iinfo(np.int16).max
-		if len(input_wav.shape) > 1:
-			input_wav = input_wav.mean(-1)
-		if fs != 16000:
-			print(f"audio_fs: {fs}")
-			resampler = torchaudio.transforms.Resample(fs, 16000)
-			input_wav_t = torch.from_numpy(input_wav).to(torch.float32)
-			input_wav = resampler(input_wav_t[None, :])[0, :].numpy()
-	
-	
-	merge_vad = True #False if selected_task == "ASR" else True
-	print(f"language: {language}, merge_vad: {merge_vad}")
-	text = model.generate(input=input_wav,
-						  cache={},
-						  language=language,
-						  use_itn=True,
-						  batch_size_s=0, merge_vad=merge_vad)
-	
-	print(text)
-	text = text[0]["text"]
-	text = format_str_v3(text)
-	
-	print(text)
-	
-	return text
-
-
-def model_inference(input_wav, language, fs=16000):
-    language_abbr = {"auto": "auto", "zh": "zh", "en": "en", "yue": "yue", "ja": "ja", "ko": "ko",
-                     "nospeech": "nospeech"}
-    
+    language_abbr = {"auto": "auto", "zh": "zh", "en": "en", "yue": "yue", "ja": "ja", "ko": "ko", "nospeech": "nospeech"}
     language = "auto" if len(language) < 1 else language
     selected_language = language_abbr[language]
     
@@ -196,26 +153,82 @@ def model_inference(input_wav, language, fs=16000):
         if len(input_wav.shape) > 1:
             input_wav = input_wav.mean(-1)
         if fs != 16000:
-            print(f"audio_fs: {fs}")
-            resampler = torchaudio.transforms.Resample(fs, 16000)
-            input_wav_t = torch.from_numpy(input_wav).to(torch.float32)
-            input_wav = resampler(input_wav_t[None, :])[0, :].numpy()
-    
+            print(f"音频采样率为 {fs} Hz，需要重采样到 16000 Hz。")
+            if fs <= 0:
+                print("无效的采样率。")
+                return ""
+            if len(input_wav) == 0:
+                print("输入音频为空。")
+                return ""
+            try:
+                resampler = torchaudio.transforms.Resample(fs, 16000)
+                input_wav_t = torch.from_numpy(input_wav).to(torch.float32)
+                input_wav = resampler(input_wav_t[None, :])[0, :].numpy()
+            except Exception as e:
+                print(f"重采样错误: {e}")
+                return ""
+
+    # 检查音频片段是否太小
+    if len(input_wav) < 400:
+        print("音频片段太小。")
+        return ""
+
+    # 确保音频片段长度适用于窗口大小
+    window_size = 400
+    if len(input_wav) < window_size:
+        print("音频片段长度小于窗口大小。")
+        return ""
+
     merge_vad = True
     print(f"language: {language}, merge_vad: {merge_vad}")
-    text = model.generate(input=input_wav,
-                          cache={},
-                          language=language,
-                          use_itn=True,
-                          batch_size_s=0, merge_vad=merge_vad)
+
+    try:
+        text = model.generate(input=input_wav, cache={}, language=selected_language, use_itn=True, batch_size_s=0, merge_vad=merge_vad)
+    except AssertionError as e:
+        print(f"AssertionError: {e}")
+        return ""
     
     print(text)
     text = text[0]["text"]
     text = format_str_v3(text)
     
     print(text)
-    
     return text
+
+
+# def model_inference(input_wav, language, fs=16000):
+#     language_abbr = {"auto": "auto", "zh": "zh", "en": "en", "yue": "yue", "ja": "ja", "ko": "ko",
+#                      "nospeech": "nospeech"}
+    
+#     language = "auto" if len(language) < 1 else language
+#     selected_language = language_abbr[language]
+    
+#     if isinstance(input_wav, tuple):
+#         fs, input_wav = input_wav
+#         input_wav = input_wav.astype(np.float32) / np.iinfo(np.int16).max
+#         if len(input_wav.shape) > 1:
+#             input_wav = input_wav.mean(-1)
+#         if fs != 16000:
+#             print(f"audio_fs: {fs}")
+#             resampler = torchaudio.transforms.Resample(fs, 16000)
+#             input_wav_t = torch.from_numpy(input_wav).to(torch.float32)
+#             input_wav = resampler(input_wav_t[None, :])[0, :].numpy()
+    
+#     merge_vad = True
+#     print(f"language: {language}, merge_vad: {merge_vad}")
+#     text = model.generate(input=input_wav,
+#                           cache={},
+#                           language=language,
+#                           use_itn=True,
+#                           batch_size_s=0, merge_vad=merge_vad)
+    
+#     print(text)
+#     text = text[0]["text"]
+#     text = format_str_v3(text)
+    
+#     print(text)
+    
+#     return text
 # 转换毫秒到SRT时间格式
 def ms_to_srt_time(ms):
     seconds, milliseconds = divmod(ms, 1000)
@@ -253,7 +266,8 @@ def segment_and_transcribe(input_wav, language, output_path = "outsrt/transcript
         if start_time < start:
             srt_content.append(f"{counter}\n{ms_to_srt_time(start_time)} --> {ms_to_srt_time(start)}\n\n")
             counter += 1
-        # 处理非静音片段
+        # 处理非静音片段	
+		
         chunk = audio_segment[start:end]
         segment_wav = np.array(chunk.get_array_of_samples())
         segment_wav = (segment_wav / np.iinfo(np.int16).max).astype(np.float32)
